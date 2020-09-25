@@ -13,7 +13,7 @@ contract ZETA is ERC20 {
 
     uint public tokenPerBlock;
 
-    uint public constant BONUS_MULTIPLIER = 10;
+    uint public constant BONUS_MULTIPLIER = 3;
     uint public constant ADMIN_DIVIDER = 10;
 
     uint public startBlock;
@@ -146,7 +146,10 @@ contract ZETA is ERC20 {
         if(pool.addrUni != address(0)) {
             rewardPerTokenUni = IUNIStakingRewards(pool.addrUni).rewardPerToken();
         }
-        return user.depositAmount.mul(rewardPerTokenUni.sub(user.userRewardPerTokenPaidUni)).div(1e18).add(user.rewardsUni);
+        return user.depositAmount
+            .mul(rewardPerTokenUni.sub(user.userRewardPerTokenPaidUni))
+            .div(1e18)
+            .add(user.rewardsUni);
     }
 
     function deposit(uint8 idx, uint amount) public {
