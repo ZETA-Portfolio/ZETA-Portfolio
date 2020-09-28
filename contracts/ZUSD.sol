@@ -189,14 +189,16 @@ contract ZUSD is ERC20 {
         uint actualBurnAmount = totalSupply.mul(userValue).div(totalValue);
         require(actualBurnAmount <= burnAmountWithoutFee, "Too much to redeem");
 
-        _burn(msg.sender, actualBurnAmount);
-        _mint(address(this), burnAmount.sub(burnAmountWithoutFee));
+        uint feeAmount = actualBurnAmount.sub(getAmountWithoutFee(actualBurnAmount));
+
+        _burn(msg.sender, actualBurnAmount.add(feeAmount));
+        _mint(address(this), feeAmount);
 
         emit Redeem(
             msg.sender,
             userValue,
             totalValue,
-            actualBurnAmount
+            actualBurnAmount.add(feeAmount)
         );
     }
 
