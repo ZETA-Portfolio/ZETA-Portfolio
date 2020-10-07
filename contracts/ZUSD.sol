@@ -39,7 +39,7 @@ contract ZUSD is ERC20 {
         uint burnAmount
     );
 
-    uint public feePercentage = 9995;
+    uint public feePercentage = 9998;
     uint public totalPercentage = 10000;
 
 

@@ -12,15 +12,15 @@ contract ZETA is ERC20 {
     using SafeERC20 for IERC20;
 
     uint public tokenPerBlock;
+    uint public tokenPerBlockAdmin;
 
-    uint public constant BONUS_MULTIPLIER = 3;
-    uint public constant ADMIN_DIVIDER = 10;
+    uint public BONUS_MULTIPLIER;
 
     uint public startBlock;
     uint public bonusEndBlock;
     uint public endBlock;
 
-    uint public adminEndBlock;
+    uint public adminClaimRewardEndBlock;
     uint public lastClaimBlockAdmin;
 
     uint public totalPoolWeight;
@@ -28,7 +28,8 @@ contract ZETA is ERC20 {
     IAdmin public admin;
 
     poolInfo[] public rewardPools;
-    address public UNI;
+    address public UNIAddress;
+    address public adminReceiveAddress;
 
     struct userInfo {
         uint lastClaimAmount;
@@ -38,8 +39,8 @@ contract ZETA is ERC20 {
     }
 
     struct poolInfo {
-        address addr;
-        address addrUni;
+        address addrToken;
+        address addrUniStakingRewards;
         uint rewardRate;
         uint lastUpdateBlock;
         uint totalBalance;
@@ -48,43 +49,60 @@ contract ZETA is ERC20 {
     }
 
 
-    mapping (address => mapping (uint8 => userInfo)) public userInfos;
+    mapping (address => mapping (uint => userInfo)) public userInfos;
 
     event NewRewardPool(address rewardPool);
-    event Deposit(address indexed _from, uint8 indexed idx, uint amount);
-    event Withdrawal(address indexed _from, uint8 indexed idx, uint amount);
-    event ClaimReward(address indexed _from, uint8 indexed idx, uint amount);
+    event Deposit(address indexed account, uint indexed idx, uint amount);
+    event Withdrawal(address indexed account, uint indexed idx, uint amount);
+    event ClaimReward(address indexed account, uint indexed idx, uint amount);
 
     constructor (
         address adminAddress,
-        address uni,
+        address _adminReceiveAddress,
+        address reserveContractAddress,
+        address YFIInspirdropAddress,
+        address uniAddress,
         uint _tokenPerBlock,
         uint _startBlock,
         uint _bonusEndBlock,
         uint _endBlock,
-        uint _adminEndBlock
+        uint _adminEndBlock,
+        uint initialReserveAmount,
+        uint yfiAirdropAmount,
+        uint _tokenPerBlockAdmin,
+        uint _bonus_multiplier
     ) ERC20("ZETA", "ZETA") public {
         tokenPerBlock = _tokenPerBlock;
         startBlock = _startBlock;
         bonusEndBlock = _bonusEndBlock;
         endBlock = _endBlock;
-        adminEndBlock = _adminEndBlock;
+        adminClaimRewardEndBlock = _adminEndBlock;
+        tokenPerBlockAdmin = _tokenPerBlockAdmin;
+        BONUS_MULTIPLIER = _bonus_multiplier;
+
         lastClaimBlockAdmin = startBlock;
 
         admin = IAdmin(adminAddress);
-        UNI = uni;
-        userInfos[admin.admin()][0] = userInfo(0, 0, 0, 0);
+        adminReceiveAddress = _adminReceiveAddress;
+        _mint(reserveContractAddress, initialReserveAmount);
+        _mint(YFIInspirdropAddress, yfiAirdropAmount);
+        UNIAddress = uniAddress;
     }
 
-    function addRewardPool(address addr, address addrUni, uint poolWeight) public {
+    function setAdminReceiveAddress(address addr) public {
         require(msg.sender == admin.admin(), "Not admin");
-        for (uint8 i = 0; i < rewardPools.length; i++) {
+        adminReceiveAddress = addr;
+    }
+
+    function addRewardPool(address addrToken, address addrUniStakingRewards, uint poolWeight) public {
+        require(msg.sender == admin.admin(), "Not admin");
+        for (uint i = 0; i < rewardPools.length; i++) {
             updatePool(i);
         }
         rewardPools.push(
             poolInfo(
-                addr,
-                addrUni,
+                addrToken,
+                addrUniStakingRewards,
                 0,
                 startBlock > block.number ? startBlock : block.number,
                 0,
@@ -93,12 +111,12 @@ contract ZETA is ERC20 {
             )
         );
         totalPoolWeight = totalPoolWeight.add(poolWeight);
-        emit NewRewardPool(addr);
+        emit NewRewardPool(addrToken);
     }
 
-    function setPoolWeight(uint8 idx, uint poolWeight) public {
+    function setPoolWeight(uint idx, uint poolWeight) public {
         require(msg.sender == admin.admin(), "Not admin");
-        for (uint8 i = 0; i < rewardPools.length; i++) {
+        for (uint i = 0; i < rewardPools.length; i++) {
             updatePool(i);
         }
         totalPoolWeight = totalPoolWeight.sub(rewardPools[idx].poolWeight).add(poolWeight);
@@ -123,7 +141,7 @@ contract ZETA is ERC20 {
         return period.mul(tokenPerBlock);
     }
 
-    function rewardAmount(uint8 idx, address account) public view returns (uint) {
+    function rewardAmount(uint idx, address account) public view returns (uint) {
         poolInfo memory pool = rewardPools[idx];
         userInfo memory user = userInfos[account][idx];
 
@@ -139,12 +157,13 @@ contract ZETA is ERC20 {
         return user.depositAmount.mul(rewardRate).div(1e18).sub(user.lastClaimAmount);
     }
 
-    function rewardAmountUni(uint8 idx, address account) public view returns (uint) {
+    function rewardAmountUni(uint idx, address account) public view returns (uint) {
         poolInfo memory pool = rewardPools[idx];
         userInfo memory user = userInfos[account][idx];
         uint rewardPerTokenUni = 0;
-        if(pool.addrUni != address(0)) {
-            rewardPerTokenUni = IUNIStakingRewards(pool.addrUni).rewardPerToken();
+        if(pool.addrUniStakingRewards != address(0)) {
+            rewardPerTokenUni = IUNIStakingRewards(pool.addrUniStakingRewards)
+                .rewardPerToken();
         }
         return user.depositAmount
             .mul(rewardPerTokenUni.sub(user.userRewardPerTokenPaidUni))
@@ -152,7 +171,7 @@ contract ZETA is ERC20 {
             .add(user.rewardsUni);
     }
 
-    function deposit(uint8 idx, uint amount) public {
+    function deposit(uint idx, uint amount) public {
         require(idx < rewardPools.length, "Not in reward pool list");
 
         userInfo storage user = userInfos[msg.sender][idx];
@@ -169,17 +188,17 @@ contract ZETA is ERC20 {
         user.depositAmount = user.depositAmount.add(amount);
         user.lastClaimAmount = user.depositAmount.mul(pool.rewardRate).div(1e18);
 
-        IERC20(pool.addr).safeTransferFrom(msg.sender, address(this), amount);
+        IERC20(pool.addrToken).safeTransferFrom(msg.sender, address(this), amount);
 
-        if (pool.addrUni != address(0)) {
-            IERC20(pool.addr).approve(pool.addrUni, amount);
-            IUNIStakingRewards(pool.addrUni).stake(amount);
+        if (pool.addrUniStakingRewards != address(0)) {
+            IERC20(pool.addrToken).approve(pool.addrUniStakingRewards, amount);
+            IUNIStakingRewards(pool.addrUniStakingRewards).stake(amount);
         }
 
         emit Deposit(msg.sender, idx, amount);
     }
 
-    function withdraw(uint8 idx, uint amount) public {
+    function withdraw(uint idx, uint amount) public {
         require(idx < rewardPools.length, "Not in reward pool list");
 
         userInfo storage user = userInfos[msg.sender][idx];
@@ -192,23 +211,23 @@ contract ZETA is ERC20 {
         user.depositAmount = user.depositAmount.sub(amount);
         user.lastClaimAmount = user.depositAmount.mul(pool.rewardRate).div(1e18);
 
-        if (pool.addrUni != address(0)) {
-            IUNIStakingRewards(pool.addrUni).withdraw(amount);
+        if (pool.addrUniStakingRewards != address(0)) {
+            IUNIStakingRewards(pool.addrUniStakingRewards).withdraw(amount);
         }
 
-        IERC20(pool.addr).safeTransfer(msg.sender, amount);
+        IERC20(pool.addrToken).safeTransfer(msg.sender, amount);
 
         emit Withdrawal(msg.sender, idx, amount);
     }
 
-    function updatePoolUni(uint8 idx) private {
+    function updatePoolUni(uint idx) private {
         poolInfo storage pool = rewardPools[idx];
         userInfo storage user = userInfos[msg.sender][idx];
-        IUNIStakingRewards uni = IUNIStakingRewards(pool.addrUni);
+        IUNIStakingRewards uni = IUNIStakingRewards(pool.addrUniStakingRewards);
 
-        uint _before = IERC20(UNI).balanceOf(address(this));
+        uint _before = IERC20(UNIAddress).balanceOf(address(this));
         uni.getReward();
-        uint _after = IERC20(UNI).balanceOf(address(this));
+        uint _after = IERC20(UNIAddress).balanceOf(address(this));
         pool.totalRewardsUni = pool.totalRewardsUni.add(_after.sub(_before));
 
         uint rewardPerTokenUni = uni.rewardPerTokenStored();
@@ -220,7 +239,7 @@ contract ZETA is ERC20 {
         user.userRewardPerTokenPaidUni = rewardPerTokenUni;
     }
 
-    function claimRewardUni(uint8 idx) private {
+    function claimRewardUni(uint idx) private {
         poolInfo storage pool = rewardPools[idx];
         userInfo storage user = userInfos[msg.sender][idx];
         updatePoolUni(idx);
@@ -232,14 +251,14 @@ contract ZETA is ERC20 {
             }
             user.rewardsUni = 0;
             pool.totalRewardsUni = pool.totalRewardsUni.sub(_rewardAmount);
-            IERC20(UNI).safeTransfer(msg.sender, _rewardAmount);
+            IERC20(UNIAddress).safeTransfer(msg.sender, _rewardAmount);
         }
     }
 
-    function updatePool(uint8 idx) private {
+    function updatePool(uint idx) private {
         poolInfo storage pool = rewardPools[idx];
 
-        if (pool.addrUni != address(0)) {
+        if (pool.addrUniStakingRewards != address(0)) {
             claimRewardUni(idx);
         }
 
@@ -267,7 +286,7 @@ contract ZETA is ERC20 {
         pool.lastUpdateBlock = currentBlock;
     }
 
-    function claimReward(uint8 idx) public {
+    function claimReward(uint idx) public {
         require(idx < rewardPools.length, "Not in reward pool list");
         userInfo storage user = userInfos[msg.sender][idx];
 
@@ -278,27 +297,20 @@ contract ZETA is ERC20 {
             .div(1e18)
             .sub(user.lastClaimAmount);
 
-        user.lastClaimAmount = reward.add(user.lastClaimAmount);
-        _mint(msg.sender, reward);
+        if(reward > 0) {
+            user.lastClaimAmount = reward.add(user.lastClaimAmount);
+            _mint(msg.sender, reward);
+        }
 
         emit ClaimReward(msg.sender, idx, reward);
     }
 
-    function removeDust(uint8 idx) public {
-        poolInfo memory pool = rewardPools[idx];
-
-        IERC20(pool.addr).safeTransfer(
-            admin.admin(),
-            IERC20(pool.addr).balanceOf(address(this)).sub(pool.totalBalance)
-        );
-    }
-
     function claimRewardAdmin() public {
-        require(lastClaimBlockAdmin < adminEndBlock, "No more reward");
-        uint toBlock = block.number >= adminEndBlock ? adminEndBlock : block.number;
-        uint reward = toBlock.sub(lastClaimBlockAdmin).mul(tokenPerBlock).div(ADMIN_DIVIDER);
-        _mint(admin.admin(), reward);
+        require(lastClaimBlockAdmin < adminClaimRewardEndBlock, "No more reward for admin");
+        uint toBlock = block.number >= adminClaimRewardEndBlock ? adminClaimRewardEndBlock : block.number;
+        uint reward = toBlock.sub(lastClaimBlockAdmin).mul(tokenPerBlockAdmin);
+        _mint(adminReceiveAddress, reward);
         lastClaimBlockAdmin = toBlock;
-        emit ClaimReward(admin.admin(), 0, reward);
+        emit ClaimReward(adminReceiveAddress, 0, reward);
     }
 }

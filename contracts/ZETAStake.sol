@@ -1,132 +1,161 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.6.0;
 
+import "./interfaces/ERC20.sol";
 import "./interfaces/IERC20.sol";
 import "./interfaces/SafeERC20.sol";
 import "./interfaces/IAdmin.sol";
-import "./interfaces/IZUSD.sol";
+import "./interfaces/ZRewards.sol";
 
-contract ZETAStake {
+contract ZETAStake is ERC20 {
     using SafeMath for uint;
     using SafeERC20 for IERC20;
 
     IAdmin public admin;
-    IZUSD public ZUSD;
+    ZRewards[] public rewardsList;
     IERC20 public ZETA;
 
-    poolInfo public rewardPool;
+    uint[] public rewardRates;
+    mapping (uint => mapping(address => uint)) public lastClaimAmount;
 
-    struct userInfo {
-        uint lastClaimAmount;
-        uint depositAmount;
-    }
+    event ClaimReward(uint indexed idx, address indexed _from, uint amount);
 
-    struct poolInfo {
-        uint rewardRate;
-        uint totalBalance;
-    }
-
-    mapping (address =>  userInfo) public userInfos;
-
-    event Stake(address indexed _from, uint amount);
-    event Unstake(address indexed _from, uint amount);
-    event ClaimReward(address indexed _from, uint amount);
-
-    constructor(address adminAddress, address zusdAddress, address zetaAddress) public {
+    constructor(address adminAddress, address zusdAddress, address zetaAddress) ERC20("sZETA", "sZETA") public {
         admin = IAdmin(adminAddress);
-        ZUSD = IZUSD(zusdAddress);
+
+        rewardsList.push(ZRewards(zusdAddress));
+        rewardRates.push(0);
+
         ZETA = IERC20(zetaAddress);
     }
 
-    function changeZUSD(address addr) public {
+    function addRewards(address addr) public {
         require(msg.sender == admin.admin(), "Not admin");
-        ZUSD = IZUSD(addr);
+        rewardsList.push(ZRewards(addr));
+        rewardRates.push(0);
     }
 
-    function changeZETA(address addr) public {
-        require(msg.sender == admin.admin(), "Not admin");
-        ZETA = IERC20(addr);
-    }
-
-    function rewardAmount(address account) public view returns (uint) {
-        poolInfo memory pool = rewardPool;
-        userInfo memory user = userInfos[account];
-
-        uint rewardRate = pool.rewardRate;
-        if (pool.totalBalance != 0) {
-            uint rewards = IERC20(address(ZUSD)).balanceOf(address(ZUSD));
+    function rewardAmount(uint idx, address account) public view returns (uint) {
+        uint rewardRate = rewardRates[idx];
+        uint TotalSupply = totalSupply();
+        if (TotalSupply != 0) {
+            uint rewards = IERC20(address(rewardsList[idx])).balanceOf(address(rewardsList[idx]));
             rewardRate = rewardRate.add(
                 rewards
                 .mul(1e18)
-                .div(pool.totalBalance));
+                .div(TotalSupply));
         }
-        return user.depositAmount.mul(rewardRate).div(1e18).sub(user.lastClaimAmount);
+        return balanceOf(account).mul(rewardRate).div(1e18).sub(lastClaimAmount[idx][account]);
     }
 
     function stake(uint amount) public {
-        userInfo storage user = userInfos[msg.sender];
-
-        if (user.depositAmount > 0) {
-            claimReward();
-        } else {
-            updatePool();
+        for(uint idx=0; idx<rewardsList.length; idx++) {
+            _claimReward(idx, msg.sender, false);
         }
 
-        rewardPool.totalBalance = rewardPool.totalBalance.add(amount);
+        _mint(msg.sender, amount);
+        uint balance = balanceOf(msg.sender);
 
-        user.depositAmount = user.depositAmount.add(amount);
-        user.lastClaimAmount = user.depositAmount.mul(rewardPool.rewardRate).div(1e18);
+        for(uint idx=0; idx<rewardsList.length; idx++) {
+            lastClaimAmount[idx][msg.sender] = balance.mul(rewardRates[idx]).div(1e18);
+        }
 
         ZETA.safeTransferFrom(msg.sender, address(this), amount);
-        emit Stake(msg.sender, amount);
     }
 
-    function updatePool() private {
-        if (rewardPool.totalBalance == 0) {
+    function updatePool(uint idx) private {
+        if(IERC20(address(rewardsList[idx])).balanceOf(address(rewardsList[idx])) == 0) {
             return;
         }
 
-        uint _before = IERC20(address(ZUSD)).balanceOf(address(this));
-        ZUSD.sendReward();
-        uint _after = IERC20(address(ZUSD)).balanceOf(address(this));
+        uint TotalSupply = totalSupply();
+        if (TotalSupply == 0) {
+            return;
+        }
+
+        uint _before = IERC20(address(rewardsList[idx])).balanceOf(address(this));
+        rewardsList[idx].sendReward();
+        uint _after = IERC20(address(rewardsList[idx])).balanceOf(address(this));
 
         uint rewardTotal = _after.sub(_before);
 
-        rewardPool.rewardRate = rewardPool.rewardRate
+        rewardRates[idx] = rewardRates[idx]
             .add(rewardTotal
                 .mul(1e18)
-                .div(rewardPool.totalBalance)
-        );
+                .div(TotalSupply)
+            );
     }
 
     function unstake(uint amount) public {
-        userInfo storage user = userInfos[msg.sender];
+        for(uint idx=0; idx<rewardsList.length; idx++) {
+            _claimReward(idx, msg.sender, false);
+        }
 
-        claimReward();
+        _burn(msg.sender, amount);
+        uint balance = balanceOf(msg.sender);
 
-        rewardPool.totalBalance = rewardPool.totalBalance.sub(amount);
-
-        user.depositAmount = user.depositAmount.sub(amount);
-        user.lastClaimAmount = user.depositAmount.mul(rewardPool.rewardRate).div(1e18);
+        for(uint idx=0; idx<rewardsList.length; idx++) {
+            lastClaimAmount[idx][msg.sender] = balance.mul(rewardRates[idx]).div(1e18);
+        }
 
         ZETA.safeTransfer(msg.sender, amount);
-        emit Unstake(msg.sender, amount);
+    }
+
+    function _claimReward(uint idx, address addr, bool isUpdated) private {
+        if(!isUpdated) {
+            updatePool(idx);
+        }
+
+        uint balance = balanceOf(addr);
+        if(balance == 0) {
+            return;
+        }
+
+        uint reward = balance
+            .mul(rewardRates[idx])
+            .div(1e18)
+            .sub(lastClaimAmount[idx][addr]);
+
+        if(reward > 0) {
+            IERC20(address(rewardsList[idx])).safeTransfer(addr, reward);
+        }
+        emit ClaimReward(idx, addr, reward);
     }
 
     function claimReward() public {
-        userInfo storage user = userInfos[msg.sender];
+        for(uint idx=0; idx<rewardsList.length; idx++) {
+            _claimReward(idx, msg.sender, false);
+            lastClaimAmount[idx][msg.sender] = balanceOf(msg.sender).mul(rewardRates[idx]).div(1e18);
+        }
+    }
 
-        updatePool();
+    function transfer(address recipient, uint256 amount) public override returns (bool) {
+        for(uint idx=0; idx<rewardsList.length; idx++) {
+            _claimReward(idx, msg.sender, false);
+            _claimReward(idx, recipient, true);
+        }
+        super.transfer(recipient, amount);
+        uint fromBalance = balanceOf(msg.sender);
+        uint toBalance = balanceOf(recipient);
+        for(uint idx=0; idx<rewardsList.length; idx++) {
+            lastClaimAmount[idx][msg.sender] = fromBalance.mul(rewardRates[idx]).div(1e18);
+            lastClaimAmount[idx][recipient] = toBalance.mul(rewardRates[idx]).div(1e18);
+        }
+        return true;
+    }
 
-        uint reward = user.depositAmount
-            .mul(rewardPool.rewardRate)
-            .div(1e18)
-            .sub(user.lastClaimAmount);
-
-
-        user.lastClaimAmount = reward.add(user.lastClaimAmount);
-        IERC20(address(ZUSD)).safeTransfer(msg.sender, reward);
-
-        emit ClaimReward(msg.sender, reward);
+    function transferFrom(address sender, address recipient, uint256 amount) public override returns (bool) {
+        for(uint idx=0; idx<rewardsList.length; idx++) {
+            _claimReward(idx, sender, false);
+            _claimReward(idx, recipient, true);
+        }
+        super.transferFrom(sender, recipient, amount);
+        uint fromBalance = balanceOf(sender);
+        uint toBalance = balanceOf(recipient);
+        for(uint idx=0; idx<rewardsList.length; idx++) {
+            lastClaimAmount[idx][sender] = fromBalance.mul(rewardRates[idx]).div(1e18);
+            lastClaimAmount[idx][recipient] = toBalance.mul(rewardRates[idx]).div(1e18);
+        }
+        return true;
     }
 }

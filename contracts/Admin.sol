@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.6.0;
 
-import "./interfaces/IAdmin.sol";
-
 contract Admin {
     address public admin;
 
